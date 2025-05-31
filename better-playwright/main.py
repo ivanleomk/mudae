@@ -1,5 +1,26 @@
 #!/usr/bin/env python3
+"""
+Better Playwright MCP Server
+
+A Model Context Protocol (MCP) server that provides comprehensive browser automation
+capabilities using Playwright. This server enables AI assistants to interact with web
+pages through actions like navigation, element interaction, form filling, and page
+analysis.
+
+Features:
+- Browser lifecycle management with CDP connection support
+- Element interaction (click, type, extract text/links)
+- Navigation and history management
+- Form input handling with multiple selector types
+- Page snapshots (accessibility tree and visual screenshots)
+- Automatic browser cleanup and error handling
+
+The server can connect to existing browser instances via Chrome DevTools Protocol (CDP)
+or launch new browser instances as needed.
+"""
+
 import json
+import os
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -14,7 +35,6 @@ class AppContext:
     browser: Browser
     context: BrowserContext
     page: Page
-    video_path: str
 
 
 @asynccontextmanager
@@ -22,66 +42,107 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Manage browser lifecycle"""
     # Initialize browser on startup
     playwright = await async_playwright().start()
-    browser = await playwright.chromium.launch(headless=False)
+    browser = None
+
+    # Check for CDP URL in environment
+    cdp_url = os.environ.get("LOCAL_CDP_URL", "http://localhost:9222")
+
+    try:
+        # Try to connect to existing browser via CDP
+        browser = await playwright.chromium.connect_over_cdp(cdp_url)
+        print(f"Connected to existing browser at {cdp_url}")
+    except Exception as e:
+        print(f"Failed to connect to CDP at {cdp_url}: {e}")
+        # Fall back to launching new browser
+        browser = await playwright.chromium.launch(
+            headless=False,  # Set to True for headless mode
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        print("Launched new browser instance")
+
     context = await browser.new_context()
     page = await context.new_page()
 
     try:
-        yield AppContext(browser=browser, context=context, page=page, video_path="")
+        yield AppContext(browser=browser, context=context, page=page)
     finally:
         # Cleanup on shutdown
         await context.close()
         await browser.close()
+        await playwright.stop()
 
 
-mcp = FastMCP("better-playwright", lifespan=app_lifespan)
+mcp = FastMCP(
+    "better-playwright",
+    description="Browser automation server using Playwright for web interaction, navigation, and page analysis",
+    lifespan=app_lifespan,
+)
 
 
 class ElementActionInput(BaseModel):
     type: Literal["className", "id", "text"] = Field(
-        ..., description="How to select the element"
+        ...,
+        description="How to select the element - 'className' for CSS class names, 'id' for element IDs, 'text' for visible text content",
     )
     selector: str = Field(
-        ..., description="The selector value (class name, id, or text content)"
+        ...,
+        description="The selector value: class name (without dot), element ID (without hash), or exact visible text content",
     )
-    action: Literal["click", "getText", "extractLinks", "getRawElement", "type"] = Field(
-        ..., description="Action to perform"
+    action: Literal["click", "getText", "extractLinks", "getRawElement", "type"] = (
+        Field(
+            ...,
+            description="Action to perform: 'click' to click element, 'getText' to get text content, 'extractLinks' to get all links within element, 'getRawElement' to get element details, 'type' to input text",
+        )
     )
     text: str | None = Field(
-        None, description="Text to type (required when action is 'type')"
+        None,
+        description="Text to type into the element (required only when action is 'type')",
     )
 
 
 class NavigateInput(BaseModel):
-    url: str = Field(..., description="URL to navigate to")
+    type: Literal["url", "back", "forward", "refresh"] = Field(
+        "url",
+        description="Type of navigation: 'url' to navigate to a specific URL, 'back' to go back in history, 'forward' to go forward in history, 'refresh' to reload current page",
+    )
+    url: str | None = Field(
+        None,
+        description="The URL to navigate to (required only when type is 'url'). Should include protocol (http:// or https://)",
+    )
 
 
 class SnapshotInput(BaseModel):
     type: Literal["accessibility", "image"] = Field(
-        ..., description="Type of snapshot to capture"
+        ...,
+        description="Type of snapshot: 'accessibility' to get the accessibility tree structure for finding elements, 'image' to capture a visual screenshot of the page",
     )
 
 
 class FillInputInput(BaseModel):
     type: Literal["className", "id", "text", "placeholder", "label"] = Field(
-        ..., description="How to select the input element"
+        ...,
+        description="How to select the input element: 'className' for CSS class, 'id' for element ID, 'text' for visible text, 'placeholder' for placeholder text, 'label' for associated label text",
     )
     selector: str = Field(
         ...,
-        description="The selector value (class name, id, text content, placeholder, or label)",
+        description="The selector value: class name (without dot), element ID (without hash), visible text content, placeholder text, or label text",
     )
-    value: str = Field(..., description="The text to fill into the input field")
+    value: str = Field(
+        ...,
+        description="The text to fill into the input field. Will replace any existing content",
+    )
 
 
+@mcp.tool()
 def get_active_page(ctx) -> Page:
-    """Get the currently active page"""
+    """Get the currently active page instance for internal use by other tools"""
     app_context = ctx.request_context.lifespan_context
     return app_context.page
 
 
 @mcp.tool()
 async def getElement(input: ElementActionInput) -> str:
-    """Find an element and perform an action on it"""
+    """Find an element on the page and perform actions like clicking, getting text, or typing. Use this for interacting with buttons, links, text content, and form elements. Supports selecting elements by CSS class, ID, or visible text content."""
     ctx = mcp.get_context()
     page = get_active_page(ctx)
 
@@ -160,20 +221,39 @@ async def getElement(input: ElementActionInput) -> str:
 
 @mcp.tool()
 async def navigate(input: NavigateInput) -> str:
-    """Navigate to a URL"""
+    """Navigate to a specific URL or perform browser history navigation. Use this to visit websites, go back/forward in browser history, or refresh the current page. Essential for browsing between different web pages."""
     ctx = mcp.get_context()
     page = get_active_page(ctx)
 
     try:
-        await page.goto(input.url)
-        return f"Successfully navigated to {input.url}"
+        if input.type == "url":
+            if input.url is None:
+                return "Error: url parameter is required when type is 'url'"
+            await page.goto(input.url)
+            return f"Successfully navigated to {input.url}"
+
+        elif input.type == "back":
+            await page.go_back()
+            return "Successfully navigated back"
+
+        elif input.type == "forward":
+            await page.go_forward()
+            return "Successfully navigated forward"
+
+        elif input.type == "refresh":
+            await page.reload()
+            return "Successfully refreshed the page"
+
+        else:
+            return f"Error: Invalid navigation type '{input.type}'. Must be 'url', 'back', 'forward', or 'refresh'"
+
     except Exception as e:
-        return f"Error navigating to {input.url}: {str(e)}"
+        return f"Error performing navigation '{input.type}': {str(e)}"
 
 
 @mcp.tool()
 async def getSnapshot(input: SnapshotInput) -> str:
-    """Capture an accessibility tree or image snapshot of the current page. Use this before you click or get an element so that youcan see the state of the page. Use the accessibility tree to get the state of the page and selectors you can use while navigating and the image to see the state of the page."""
+    """Capture the current state of the page either as an accessibility tree or visual screenshot. The accessibility tree shows all interactive elements and their roles/names - perfect for finding selectors before interacting with elements. Screenshots provide visual confirmation of page state. Always use this before attempting to interact with page elements."""
     ctx = mcp.get_context()
     page = get_active_page(ctx)
 
@@ -196,7 +276,7 @@ async def getSnapshot(input: SnapshotInput) -> str:
             return json.dumps(
                 {
                     "type": "image",
-                    "format": "png",
+                    "format": "jpeg",
                     "data": screenshot_base64,
                     "encoding": "base64",
                 },
@@ -209,7 +289,7 @@ async def getSnapshot(input: SnapshotInput) -> str:
 
 @mcp.tool()
 async def fillInput(input: FillInputInput) -> str:
-    """Fill an input field with text using Playwright's fill() method. This is the recommended way to fill form inputs."""
+    """Fill text into form input fields like search boxes, text areas, and input forms. This is the preferred method for entering text into form elements as it properly handles input events and validation. Can target inputs by CSS class, ID, placeholder text, associated labels, or visible text."""
     ctx = mcp.get_context()
     page = get_active_page(ctx)
 
