@@ -1,15 +1,16 @@
 [project]
-name = "better-playwright"
+name = "mudae"
 version = "0.1.0"
 description = "Better Playwright MCP"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "google-genai>=1.18.0",
-    "instructor>=1.8.3",
-    "jsonref>=1.1.0",
     "mcp[cli]>=1.9.2",
-    "mss>=10.0.0",
-    "opencv-python>=4.11.0.86",
     "playwright>=1.52.0",
 ]
+
+[project.scripts]
+mudae = "mudae.main:mcp.run"
+
+[tool.uv]
+package = true
