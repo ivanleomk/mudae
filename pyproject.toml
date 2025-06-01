@@ -1,9 +1,9 @@
 [project]
 name = "mudae"
-version = "0.1.1"
+version = "0.1.2"
 description = "Better Playwright MCP"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "mcp[cli]>=1.9.2",
     "playwright>=1.52.0",
